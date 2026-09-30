@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Realistic Bus Simulator</title>
+  <style>
+    :root {
+      --bg: #091421;
+      --panel: rgba(12, 19, 26, 0.8);
+      --panel-border: rgba(255,255,255,0.12);
+      --text: #edf4ff;
+      --accent: #68d1ff;
+      --pickup: #ff4f6d;
+      --drop: #2ee0a6;
+      --gold: #f7c948;
+      --warning: #ff8c42;
+      --danger: #ff4b5c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top, #16273d, #091421 65%);
+      color: var(--text);
+      font-family: Arial, Helvetica, sans-serif;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+    }
+
+    .shell {
+      width: min(96vw, 1200px);
+      text-align: center;
+    }
+
+    h1 {
+      margin: 8px 0 12px;
+      letter-spacing: 2px;
+      font-size: clamp(24px, 2.6vw, 40px);
+    }
+
+    .hud {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 14px;
+      padding: 12px 18px;
+      background: var(--panel);
+      border: 2px solid var(--panel-border);
+      border-radius: 12px;
+      box-shadow: 0 12px 30px rgba(0,0,0,0.25);
+      margin-bottom: 12px;
+    }
+
+    .stat {
+      min-width: 140px;
+      background: rgba(255,255,255,0.04);
+      border-radius: 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .label {
+      display: block;
+      font-size: 12px;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+      opacity: 0.7;
+    }
+
+    .value {
+      display: block;
+      margin-top: 5px;
+      font-size: 30px;
+      font-weight: 700;
+    }
+
+    canvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 18px;
+      border: 3px solid var(--panel-border);
+      background: #7da9d9;
+      box-shadow: 0 24px 45px rgba(0,0,0,0.35);
+    }
+
+    .controls {
+      margin-top: 12px;
+      color: #dfeeff;
+      font-size: 17px;
+      line-height: 1.6;
+      opacity: 0.95;
+    }
+
+    .message {
+      min-height: 28px;
+      margin-top: 8px;
+      font-weight: 700;
+      color: #f0f7ff;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <h1>Urban Bus Simulator</h1>
+
+    <div class="hud">
+      <div class="stat">
+        <span class="label">Score</span>
+        <span id="score" class="value">0</span>
+      </div>
+      <div class="stat">
+        <span class="label">Time</span>
+        <span id="time" class="value">90</span>
+      </div>
+      <div class="stat">
+        <span class="label">Lives</span>
+        <span id="lives" class="value">3</span>
+      </div>
+      <div class="stat">
+        <span class="label">Passenger</span>
+        <span id="passenger" class="value">None</span>
+      </div>
+    </div>
+
+    <canvas id="gameCanvas" width="1180" height="700"></canvas>
+
+    <div class="controls">
+      Steering: A / D or Left / Right<br />
+      Throttle: W / Up, Brake: S / Down<br />
+      Pause: P, Restart after game over: R
+    </div>
+
+    <div id="message" class="message">Pick up passengers at red stops and deliver them to green stops.</div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    const scoreEl = document.getElementById("score");
+    const timeEl = document.getElementById("time");
+    const livesEl = document.getElementById("lives");
+    const passengerEl = document.getElementById("passenger");
+    const messageEl = document.getElementById("message");
+
+    const road = {
+      left: 200,
+      right: 980,
+      top: 0,
+      bottom: canvas.height,
+      width: 780
+    };
+
+    const laneCenters = [road.left + road.width * 0.18, road.left + road.width * 0.5, road.left + road.width * 0.82];
+
+    let score = 0;
+    let timeLeft = 90;
+    let lives = 3;
+    let passengerOnBoard = false;
+    let paused = false;
+    let gameOver = false;
+    let message = "Pick up passengers at red stops and deliver them to green stops.";
+
+    const input = {
+      left: false,
+      right: false,
+      up: false,
+      down: false
+    };
+
+    const player = {
+      x: laneCenters[1],
+      y: canvas.height - 130,
+      width: 120,
+      height: 58,
+      speed: 0,
+      maxSpeed: 5.8,
+      targetLane: 1,
+      laneOffset: 0
+    };
+
+    let roadScroll = 0;
+    let traffic = [];
+    let stops = [];
+    let particleBursts = [];
+    let lastTime = 0;
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function updateHUD() {
+      scoreEl.textContent = score;
+      timeEl.textContent = Math.max(0, Math.ceil(timeLeft));
+      livesEl.textContent = lives;
+      passengerEl.textContent = passengerOnBoard ? "Onboard" : "None";
+      messageEl.textContent = message;
+    }
+
+    function setMessage(msg) {
+      message = msg;
+      updateHUD();
+    }
+
+    function resetGame() {
+      score = 0;
+      timeLeft = 90;
+      lives = 3;
+      passengerOnBoard = false;
+      paused = false;
+      gameOver = false;
+      message = "Pick up passengers at red stops and deliver them to green stops.";
+
+      player.x = laneCenters[1];
+      player.y = canvas.height - 130;
+      player.speed = 0;
+      player.targetLane = 1;
+      player.laneOffset = 0;
+
+      roadScroll = 0;
+      traffic = [];
+      stops = [];
+      particleBursts = [];
+      updateHUD();
+    }
+
+    function randomBetween(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+
+    function randInt(min, max) {
+      return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    function spawnStop() {
+      const lane = randInt(0, 2);
+      const type = Math.random() < 0.55 ? "pickup" : "drop";
+      const y = -120;
+      stops.push({
+        lane,
+        type,
+        y,
+        done: false,
+        scale: 1
+      });
+    }
+
+    function spawnTraffic() {
+      const lane = randInt(0, 2);
+      const carTypes = ["car", "van", "taxi"];
+      const type = carTypes[randInt(0, carTypes.length - 1)];
+
+      const x = laneCenters[lane];
+      const y = -90 - Math.random() * 180;
+
+      traffic.push({
+        lane,
+        type,
+        x,
+        y,
+        width: 52,
+        height: 86,
+        speed: randomBetween(180, 320)
+      });
+    }
+
+    function createBurst(x, y, color) {
+      for (let i = 0; i < 14; i++) {
+        particleBursts.push({
+          x, y,
+          vx: randomBetween(-110, 110),
+          vy: randomBetween(-130, 30),
+          life: randomBetween(0.4, 0.9),
+          color
+        });
+      }
+    }
+
+    function triggerStop(stop) {
+      if (stop.done) return;
+
+      stop.done = true;
+
+      if (stop.type === "pickup") {
+        if (passengerOnBoard) {
+          lives = Math.max(0, lives - 1);
+          setMessage("You already have a passenger! -1 life.");
+          createBurst(stop.x, stop.y, "#ff4f6d");
+          return;
+        }
+
+        passengerOnBoard = true;
+        score += 35;
+        setMessage("Passenger picked up. Drive to a green stop.");
+        createBurst(stop.x, stop.y, "#2ee0a6");
+      } else {
+        if (!passengerOnBoard) {
+          lives = Math.max(0, lives - 1);
+          setMessage("No passenger to drop off. -1 life.");
+          createBurst(stop.x, stop.y, "#ff8c42");
+          return;
+        }
+
+        passengerOnBoard = false;
+        score += 70;
+        setMessage("Passenger delivered successfully.");
+        createBurst(stop.x, stop.y, "#2ee0a6");
+      }
+    }
+
+    function handleInput(dt) {
+      if (gameOver || paused) return;
+
+      const steering = (input.left ? -1 : 0) + (input.right ? 1 : 0);
+      const throttle = (input.up ? 1 : 0) - (input.down ? 0.7 : 0);
+
+      player.speed += throttle * 3.8 * dt;
+      player.speed *= 0.96;
+
+      if (!input.up && !input.down) {
+        player.speed *= 0.8;
+      }
+
+      player.speed = clamp(player.speed, -1.3, player.maxSpeed);
+
+      // lane movement using target lane
+      const desiredLane = player.targetLane;
+      const targetX = laneCenters[desiredLane];
+      const delta = targetX - player.x;
+
+      if (steering !== 0) {
+        player.targetLane = clamp(player.targetLane + steering, 0, 2);
+      }
+
+      // smooth horizontal motion
+      player.x += delta * 0.12 + steering * 24 * dt;
+      player.x = clamp(player.x, road.left + 80, road.right - 80);
+
+      if (Math.abs(player.x - laneCenters[player.targetLane]) < 20) {
+        player.x = laneCenters[player.targetLane];
+      }
+
+      // slight bus tilt from steering
+      player.tilt = steering * 18;
+    }
+
+    function update(dt) {
+      if (gameOver || paused) return;
+
+      timeLeft -= dt;
+      if (timeLeft <= 0) {
+        timeLeft = 0;
+        gameOver = true;
+        setMessage("Time is up! Final score: " + score + ". Press R to restart.");
+        return;
+      }
+
+      handleInput(dt);
+
+      roadScroll += (player.speed * 60) * dt;
+
+      // stop spawning
+      if (Math.random() < 0.018) {
+        spawnStop();
+      }
+
+      // traffic spawning
+      if (Math.random() < 0.017) {
+        spawnTraffic();
+      }
+
+      // update traffic
+      for (let i = traffic.length - 1; i >= 0; i--) {
+        const car = traffic[i];
+        car.y += car.speed * dt + player.speed * 32 * dt;
+
+        if (car.y > canvas.height + 120) {
+          traffic.splice(i, 1);
+          continue;
+        }
+
+        const sameLane = Math.abs(car.x - player.x) < 46 && Math.abs(car.y - player.y) < 60;
+
+        if (sameLane) {
+          lives--;
+          setMessage("Traffic collision! -1 life.");
+          createBurst(player.x, player.y, "#ff4b5c");
+          traffic.splice(i, 1);
+
+          if (lives <= 0) {
+            gameOver = true;
+            setMessage("Your bus was wrecked. Final score: " + score + ". Press R to restart.");
+          }
+          return;
+        }
+      }
+
+      // update stops
+      for (let i = stops.length - 1; i >= 0; i--) {
+        const stop = stops[i];
+        stop.y += (120 + player.speed * 32) * dt;
+
+        const busStopX = laneCenters[stop.lane];
+        const busStopY = player.y + player.height * 0.6;
+
+        const nearEnough = Math.abs(stop.y - busStopY) < 40 && Math.abs(busStopX - player.x) < 55;
+
+        if (nearEnough) {
+          triggerStop(stop);
+        }
+
+        if (stop.y > canvas.height + 80) {
+          stops.splice(i, 1);
+        }
+      }
+
+      // particulate updates
+      for (let i = particleBursts.length - 1; i >= 0; i--) {
+        const p = particleBursts[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += 100 * dt;
+        p.life -= dt;
+
+        if (p.life <= 0) {
+          particleBursts.splice(i, 1);
+        }
+      }
+
+      if (lives <= 0) {
+        gameOver = true;
+      }
+
+      updateHUD();
+    }
+
+    function drawSkyline() {
+      const sky = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      sky.addColorStop(0, "#7eb9ea");
+      sky.addColorStop(0.55, "#c4dff9");
+      sky.addColorStop(1, "#dcecff");
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // hillside / far background
+      ctx.fillStyle = "#a1c59d";
+      ctx.beginPath();
+      ctx.moveTo(0, canvas.height - 170);
+      ctx.lineTo(220, canvas.height - 250);
+      ctx.lineTo(430, canvas.height - 220);
+      ctx.lineTo(700, canvas.height - 270);
+      ctx.lineTo(980, canvas.height - 190);
+      ctx.lineTo(canvas.width, canvas.height - 150);
+      ctx.lineTo(canvas.width, canvas.height);
+      ctx.lineTo(0, canvas.height);
+      ctx.closePath();
+      ctx.fill();
+
+      // city buildings
+      for (let x = 20; x < canvas.width; x += 60) {
+        const h = 80 + (x * 3) % 160;
+        ctx.fillStyle = "#a6b4c8";
+        ctx.fillRect(x, canvas.height - 220 - h, 42, h);
+
+        ctx.fillStyle = "rgba(255,255,255,0.3)";
+        for (let wx = x + 8; wx < x + 34; wx += 10) {
+          for (let wy = canvas.height - 210 - h; wy < canvas.height - 210; wy += 14) {
+            ctx.fillRect(wx, wy, 5, 8);
+          }
+        }
+      }
+    }
+
+    function drawRoad() {
+      ctx.fillStyle = "#4a4d54";
+      ctx.fillRect(road.left, 0, road.width, canvas.height);
+
+      // shoulders
+      ctx.fillStyle = "#d7e0eb";
+      ctx.fillRect(road.left - 18, 0, 16, canvas.height);
+      ctx.fillRect(road.right + 2, 0, 16, canvas.height);
+
+      ctx.fillStyle = "#58606b";
+      ctx.fillRect(road.left + 18, 0, 10, canvas.height);
+      ctx.fillRect(road.right - 28, 0, 10, canvas.height);
+
+      // road markings
+      ctx.setLineDash([32, 26]);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#f5f7fb";
+
+      const offset = roadScroll % 54;
+
+      for (let i = -1; i < 16; i++) {
+        const y = i * 54 - offset;
+        ctx.beginPath();
+        ctx.moveTo(road.left + road.width * 0.33, y);
+        ctx.lineTo(road.left + road.width * 0.33, y + 28);
+        ctx.moveTo(road.left + road.width * 0.66, y);
+        ctx.lineTo(road.left + road.width * 0.66, y + 28);
+        ctx.stroke();
+      }
+
+      ctx.setLineDash([]);
+    }
+
+    function drawStop(stop) {
+      const x = laneCenters[stop.lane];
+      const y = stop.y;
+
+      const color = stop.type === "pickup" ? "#ff4f6d" : "#2ee0a6";
+
+      // bus stop sign
+      ctx.fillStyle = "#edf4ff";
+      ctx.fillRect(x - 22, y - 40, 44, 68);
+
+      ctx.fillStyle = color;
+      ctx.fillRect(x - 18, y - 34, 36, 50);
+
+      // sign post
+      ctx.fillStyle = "#c0d0e7";
+      ctx.fillRect(x - 3, y + 30, 6, 34);
+
+      // top post cap
+      ctx.fillStyle = "#f4f7fb";
+      ctx.fillRect(x - 20, y - 42, 40, 8);
+
+      // little indicator
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.arc(x, y - 8, 9, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (stop.type === "pickup") {
+        ctx.fillStyle = "#ff4f6d";
+        ctx.fillRect(x - 5, y - 12, 10, 16);
+      } else {
+        ctx.fillStyle = "#2ee0a6";
+        ctx.fillRect(x - 6, y - 10, 12, 12);
+      }
+    }
+
+    function drawTrafficCar(car) {
+      ctx.save();
+      ctx.translate(car.x, car.y);
+
+      const c = car.type === "taxi" ? "#f6d85c" : car.type === "van" ? "#5e86ff" : "#ff5d6c";
+
+      ctx.fillStyle = c;
+      ctx.fillRect(-26, -42, 52, 84);
+
+      // windshield
+      ctx.fillStyle = "rgba(230,240,255,0.7)";
+      ctx.fillRect(-18, -30, 36, 18);
+
+      // windows
+      ctx.fillStyle = "#dfeaf9";
+      ctx.fillRect(-18, -10, 12, 16);
+      ctx.fillRect(6, -10, 12, 16);
+
+      // wheels
+      ctx.fillStyle = "#1c242d";
+      ctx.fillRect(-20, -38, 8, 8);
+      ctx.fillRect(12, -38, 8, 8);
+      ctx.fillRect(-20, 30, 8, 8);
+      ctx.fillRect(12, 30, 8, 8);
+
+      // headlights
+      ctx.fillStyle = "#fef5ba";
+      ctx.fillRect(-18, 36, 10, 6);
+      ctx.fillRect(8, 36, 10, 6);
+
+      ctx.restore();
+    }
+
+    function drawBus() {
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      ctx.rotate(player.tilt * Math.PI / 180);
+
+      // shadow
+      ctx.fillStyle = "rgba(0,0,0,0.2)";
+      ctx.fillRect(-52, 26, 104, 18);
+
+      // bus body
+      ctx.fillStyle = "#f8c843";
+      ctx.fillRect(-58, -24, 116, 60);
+
+      // roof
+      ctx.fillStyle = "#d8a400";
+      ctx.fillRect(-48, -34, 96, 12);
+
+      // windshield & passengers windows
+      ctx.fillStyle = "#dfeaf9";
+      ctx.fillRect(-46, -18, 20, 18);
+      ctx.fillRect(-20, -18, 18, 18);
+      ctx.fillRect(4, -18, 18, 18);
+      ctx.fillRect(28, -18, 16, 18);
+
+      // front windshield
+      ctx.fillStyle = "#eef6ff";
+      ctx.fillRect(46, -12, 12, 22);
+
+      // door
+      ctx.fillStyle = "#f7d76e";
+      ctx.fillRect(-10, -10, 22, 42);
+
+      // wheels
+      ctx.fillStyle = "#1a1d22";
+      ctx.fillRect(-38, 34, 14, 12);
+      ctx.fillRect(24, 34, 14, 12);
+      ctx.fillRect(-38, -40, 14, 12);
+      ctx.fillRect(24, -40, 14, 12);
+
+      // headlights
+      ctx.fillStyle = "#fff7d6";
+      ctx.fillRect(52, -8, 8, 6);
+      ctx.fillRect(52, 10, 8, 6);
+
+      // rear lights
+      ctx.fillStyle = "#ff7b7b";
+      ctx.fillRect(-60, -8, 8, 6);
+      ctx.fillRect(-60, 10, 8, 6);
+
+      ctx.restore();
+    }
+
+    function drawPassengerStatus() {
+      const x = 42;
+      const y = 38;
+      ctx.fillStyle = "rgba(12,18,26,0.5)";
+      ctx.fillRect(x, y, 300, 52);
+      ctx.fillStyle = passengerOnBoard ? "#2ee0a6" : "#f8c843";
+      ctx.fillRect(x + 18, y + 12, 28, 28);
+
+      ctx.fillStyle = "#edf4ff";
+      ctx.font = "bold 18px Arial";
+      ctx.fillText(passengerOnBoard ? "Passenger on board" : "No passenger", x + 60, y + 32);
+    }
+
+    function drawParticles() {
+      for (const p of particleBursts) {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.life * 1.2;
+        ctx.fillRect(p.x, p.y, 5, 5);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    function drawPauseOverlay() {
+      if (!paused || gameOver) return;
+      ctx.fillStyle = "rgba(8,12,18,0.54)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 42px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("Paused", canvas.width/2, canvas.height/2);
+      ctx.textAlign = "left";
+    }
+
+    function drawGameOverOverlay() {
+      if (!gameOver) return;
+      ctx.fillStyle = "rgba(7,10,16,0.7)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 42px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("Route Complete", canvas.width/2, canvas.height/2 - 20);
+
+      ctx.font = "24px Arial";
+      ctx.fillText("Score: " + score, canvas.width/2, canvas.height/2 + 24);
+
+      ctx.font = "20px Arial";
+      ctx.fillText("Press R to restart", canvas.width/2, canvas.height/2 + 62);
+      ctx.textAlign = "left";
+    }
+
+    function render() {
+      drawSkyline();
+      drawRoad();
+
+      for (const stop of stops) {
+        drawStop(stop);
+      }
+
+      for (const car of traffic) {
+        drawTrafficCar(car);
+      }
+
+      drawBus();
+      drawPassengerStatus();
+      drawParticles();
+      drawPauseOverlay();
+      drawGameOverOverlay();
+    }
+
+    function frame(ts) {
+      const dt = Math.min(0.032, (ts - lastTime) / 1000 || 0.016);
+      lastTime = ts;
+
+      update(dt);
+      render();
+      requestAnimationFrame(frame);
+    }
+
+    document.addEventListener("keydown", (event) => {
+      const key = event.key.toLowerCase();
+
+      if (key === "a" || key === "arrowleft") input.left = true;
+      if (key === "d" || key === "arrowright") input.right = true;
+      if (key === "w" || key === "arrowup") input.up = true;
+      if (key === "s" || key === "arrowdown") input.down = true;
+
+      if (key === "p") {
+        if (!gameOver) {
+          paused = !paused;
+          setMessage(paused ? "Paused" : "Back on route.");
+        }
+      }
+
+      if (key === "r" && gameOver) {
+        resetGame();
+      }
+    });
+
+    document.addEventListener("keyup", (event) => {
+      const key = event.key.toLowerCase();
+      if (key === "a" || key === "arrowleft") input.left = false;
+      if (key === "d" || key === "arrowright") input.right = false;
+      if (key === "w" || key === "arrowup") input.up = false;
+      if (key === "s" || key === "arrowdown") input.down = false;
+    });
+
+    resetGame();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
